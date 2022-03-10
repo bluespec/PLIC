@@ -23,16 +23,17 @@ import  Assert       :: *;
 // ----------------
 // BSV additional libs
 
-import  Cur_Cycle  :: *;
-import  GetPut_Aux :: *;
-import  Semi_FIFOF :: *;
+import  Cur_Cycle    :: *;
+import  GetPut_Aux   :: *;
+import  Semi_FIFOF   :: *;
 
 // ================================================================
 // Project imports
 
-import AHBL_Types       :: *;
-import AHBL_Defs        :: *;
-import Fabric_Defs  :: *;    // for Wd_Id, Wd_Addr, Wd_Data, Wd_User
+import AHBL_Types    :: *;
+import AHBL_Defs     :: *;
+import Fabric_Defs   :: *;    // for Wd_Id, Wd_Addr, Wd_Data, Wd_User
+import SoC_Map       :: *;
 
 // ================================================================
 // Change bitwidth without requiring < or > constraints.
@@ -49,13 +50,6 @@ endfunction
 typedef  10  T_wd_source_id;    // Max 1024 sources (source 0 is reserved for 'no interrupt')
 typedef   5  T_wd_target_id;    // Max 32 targets
 typedef enum { RST, RDY, RSP, ERR1, ERR2 } AHBL_Tgt_State deriving (Bits, Eq, FShow);
-
-// ================================================================
-// SoC Addresses, etc - User changeable
-
-Fabric_Addr plic_addr_base = 'h_0C00_0000;
-Fabric_Addr plic_addr_size = 'h_0040_0000;    // 4M
-Fabric_Addr plic_addr_lim  = 'h_0C40_0000;
 
 // ================================================================
 // Interfaces
@@ -86,9 +80,6 @@ interface PLIC_IFC #(numeric type  t_n_external_sources,
    method Action set_verbosity (Bit #(4) verbosity);
    method Action show_PLIC_state;
 
-   // Reset
-   interface Server #(Bit #(0), Bit #(0))  server_reset;
-
    // Main Fabric Reqs/Rsps
    interface AHBL_Slave_IFC #(AHB_Wd_Data) target;
 
@@ -102,16 +93,18 @@ endinterface
 // ================================================================
 // PLIC module implementation
 
-module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources)))
-                   fn_target_max_prio_and_max_id0 (Vector #(t_n_sources, Bool)                        vrg_source_ip,
-                                                   Vector #(t_n_targets, Vector #(t_n_sources, Bool)) vvrg_ie,
-                                                   Vector #(t_n_sources, Bit #(t_wd_priority))        vrg_source_prio,
-                                                         Bit #(T_wd_target_id)  target_id))
-              (PLIC_IFC #(t_n_external_sources, t_n_targets, t_max_priority))
-   provisos (Add #(1, t_n_external_sources, t_n_sources),           // source 0 is reserved for 'no source'
-             Add #(_any_0, TLog #(t_n_sources), T_wd_source_id),
-             Add #(_any_1, TLog #(t_n_targets), T_wd_target_id),
-             Log #(TAdd #(t_max_priority, 1), t_wd_priority));
+module mkPLIC #(
+   function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources))
+   ) fn_target_max_prio_and_max_id0 (
+        Vector #(t_n_sources, Bool)                         vrg_source_ip
+      , Vector #(t_n_targets, Vector #(t_n_sources, Bool))  vvrg_ie
+      , Vector #(t_n_sources, Bit #(t_wd_priority))         vrg_source_prio
+      , Bit    #(T_wd_target_id)  target_id)
+) (PLIC_IFC #(t_n_external_sources, t_n_targets, t_max_priority)) provisos (
+     Add #(1, t_n_external_sources, t_n_sources)   // source 0 is reserved for 'no source'
+   , Add #(_any_0, TLog #(t_n_sources), T_wd_source_id)
+   , Add #(_any_1, TLog #(t_n_targets), T_wd_target_id)
+   , Log #(TAdd #(t_max_priority, 1), t_wd_priority));
 
    // 0 = quiet; 1 = show PLIC transactions; 2 = also show AXI4 transactions
    Reg #(Bit #(4)) cfg_verbosity <- mkConfigReg (0);
@@ -127,35 +120,31 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // ----------------
    // Memory-mapped access
 
-   // Base and limit addrs for this memory-mapped block.
-   Reg #(Fabric_Addr)  rg_addr_base <- mkReg (plic_addr_base);
-   Reg #(Fabric_Addr)  rg_addr_lim  <- mkRegU(plic_addr_lim);
-
    // ----------------
    // AHB-Lite signals and registers
 
    // Inputs
    Wire #(Bool)        w_hsel      <- mkBypassWire;
-   Wire #(Bit #(32))   w_haddr     <- mkBypassWire;
+   Wire #(AHB_Fabric_Addr)   w_haddr     <- mkBypassWire;
    Wire #(AHBL_Burst)  w_hburst    <- mkBypassWire;
    Wire #(Bool)        w_hmastlock <- mkBypassWire;
    Wire #(AHBL_Prot)   w_hprot     <- mkBypassWire;
    Wire #(AHBL_Size)   w_hsize     <- mkBypassWire;
    Wire #(AHBL_Trans)  w_htrans    <- mkBypassWire;
-   Wire #(Bit #(32))   w_hwdata    <- mkBypassWire;
+   Wire #(AHB_Fabric_Data)   w_hwdata    <- mkBypassWire;
    Wire #(Bool)        w_hwrite    <- mkBypassWire;
 
    // Outputs
    Reg  #(Bool)       rg_hready    <- mkReg(True);
    Reg  #(AHBL_Resp)  rg_hresp     <- mkReg(AHBL_OKAY);
+   Reg  #(AHB_Fabric_Data)  rg_hrdata    <- mkRegU;
 
-   Reg #(Bit #(32))   rg_haddr     <- mkRegU;
+   Reg #(AHB_Fabric_Addr)   rg_haddr     <- mkRegU;
    Reg #(AHBL_Size)   rg_hsize     <- mkRegU;
    Reg #(AHBL_Trans)  rg_htrans    <- mkRegU;
    Reg #(Bool)        rg_hwrite    <- mkRegU;
 
    Reg #(AHBL_Tgt_State) rg_state  <- mkReg (RST);
-   // ----------------
 
    // ----------------
    // Per-interrupt source state
@@ -181,6 +170,9 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // Interrupt enables from source to target
    Vector #(t_n_targets,
             Vector #(t_n_sources, Reg #(Bool)))  vvrg_ie <- replicateM (replicateM (mkReg (False)));
+
+   // Memory map
+   SoC_Map soc_map <- mkSoC_Map;
 
    // ================================================================
    // Compute outputs for each target (combinational)
@@ -221,7 +213,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // ----------------
    // Address Checks
    function Bool fn_addr_is_in_range (Fabric_Addr addr);
-      return ((rg_addr_base <= addr) && (addr < rg_addr_lim));
+      return ((soc_map.m_pic_addr_base <= addr) && (addr < soc_map.m_pic_addr_lim));
    endfunction
 
    function Bool fn_addr_is_ok (Fabric_Addr addr, AHBL_Size size);
@@ -234,17 +226,12 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // in the first phase.
    let addr_is_ok = fn_addr_is_ok (w_haddr, w_hsize);
    
-   // Generate the new word (on writes)
-   let word_addr    = rg_haddr [31:2];
-   let byte_in_word = rg_haddr [1:0];
-   let new_word = fn_replace_bytes (byte_in_word, rg_hsize, extend (rg_gpio_out), w_hwdata);
-
    // ================================================================
-   // Soft reset
+   // Reset
 
    rule rl_reset (rg_state == RST);
-      if (cfg_verbosity > 0)
-         $display ("%0d: PLIC.rl_reset", cur_cycle);
+      if (cfg_verbosity != 0)
+         $display ("%6d:[D]:%m.rl_reset", cur_cycle);
 
       for (Integer source_id = 0; source_id < n_sources; source_id = source_id + 1) begin
          vrg_source_ip   [source_id] <= False;
@@ -307,14 +294,14 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
       end
 
       if (verbosity != 0)
-         $display ("AHBL_PLIC: haddr 0x%08h",
+         $display ("%06d:[D]:%m.rl_new_req: haddr 0x%08h",
             w_haddr, fshow (w_hsize), " hwrite %0d htrans ", w_hwrite, fshow (w_htrans));
    endrule
 
    // ----------------------------------------------------------------
    // Handle memory-mapped write requests
 
-   let addr_offset = rg_haddr - rg_addr_base;
+   let addr_offset = rg_haddr - soc_map.m_plic_addr_base;
    rule rl_wr_req ((rg_state == RSP) && (rg_hwrite));
       // Writes
       Bool werr = False; 
@@ -392,11 +379,11 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
                vrg_source_busy [source_id] <= False;
                vrg_servicing_source [target_id] <= 0;
                if (cfg_verbosity > 0)
-                  $display ("%0d: PLIC.rl_wr_req: writing completion for target %0d for source 0x%0h",
+                  $display ("%06d:[D]:%m.rl_wr_req: writing completion for target %0d for source 0x%0h",
                      cur_cycle, target_id, source_id);
             end
             else begin
-               $display ("%0d: ERROR: PLIC: interrupt completion to source that is not being serviced",
+               $display ("%06d:[E]:%m.rl_wr_req: interrupt completion to source that is not being serviced",
                          cur_cycle);
                $display ("    Completion message from target %0d to source %0d", target_id, source_id);
                $display ("    Ignoring");
@@ -408,7 +395,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 
       else begin
          werr = True;
-         $display ("%0d: ERROR: %m.rl_wr_req: unrecognized addr: %08h", cur_cycle, addr_offset);
+         $display ("%06d:[E]:%m.rl_wr_req: unrecognized addr: %08h", cur_cycle, addr_offset);
       end
 
       if (werr) fa_ahbl_error;
@@ -418,7 +405,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
       end
 
       if (cfg_verbosity > 1) 
-         $display ("%0d: %m.rl_wr_req", cur_cycle);
+         $display ("%06d:[D]:%m.rl_wr_req", cur_cycle);
    endrule
 
    // ----------------------------------------------------------------
@@ -426,6 +413,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    rule rl_rd_req ((rg_state == RSP) && (!rg_hwrite));
       // Reads
       Bool rerr = False; 
+      Bit #(32) rdata = ?;
+
       // Source Priority
       if (addr_offset < 'h1000) begin
          Bit #(T_wd_source_id)  source_id = truncate (addr_offset [11:2]);
@@ -487,7 +476,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
                $display ("%0d: PLIC.rl_process_rd_req: reading Intr Enable 32 bits from source %0d = 0x%0h",
                          cur_cycle, source_id_base, rdata);
          end
-         else  rerr = True;
+         else rerr = True;
       end
 
       // Target threshold
@@ -535,8 +524,17 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 
       else begin
          rerr = True;
-         $display ("%0d: ERROR: %m.rl_rd_req: unrecognized addr: %08h", cur_cycle, addr_offset);
+         $display ("%06d:[E]:%m.rl_rd_req: unrecognized addr: 0x%08h"
+            , cur_cycle, addr_offset);
       end
+
+      if (rerr) fa_ahbl_error;
+      else begin
+         rg_hready <= True;
+         rg_state  <= RDY;
+         rg_hrdata <= rdata;
+      end
+
    endrule
 
    rule rl_idle (   (rg_state == RDY)
@@ -614,7 +612,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
          w_hsel <= sel;
       endmethod
 
-      method Action haddr (Bit #(32) addr);
+      method Action haddr (AHB_Fabric_Addr addr);
          w_haddr <= addr;
       endmethod
 
@@ -638,7 +636,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
          w_htrans <= trans;
       endmethod
 
-      method Action hwdata(Bit #(32) data);
+      method Action hwdata(AHB_Fabric_Data data);
          w_hwdata <= data;
       endmethod
 
@@ -649,58 +647,11 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
       // ----------------
       // Outputs
 
-      method Bool       hreadyout = rg_hready;
-      method AHBL_Resp  hresp     = rg_hresp;
-      method Bit #(32)  hrdata    = extend (rg_gpio_out);
+      method Bool             hreadyout = rg_hready;
+      method AHBL_Resp        hresp     = rg_hresp;
+      method AHB_Fabric_Data  hrdata    = rg_hrdata;
    endinterface
 endmodule
-
-// ================================================================
-// AHBL data is aligned to byte lanes based on addr lsbs.
-// This function replaces the appropriate bytes of 'old_word'
-// with the appropriate bytes of HWDATA depending on the address LSBs and transfer size.
-// Also returns err=True for unsupported 'size' and misaligned addrs.
-
-function Bool fn_is_aligned (Bit #(2) addr_lsbs, AHBL_Size size);
-   let is_aligned = True;
-   case (size)
-      AHBL_BITS8  : return (True);
-      AHBL_BITS16 : case (addr_lsbs)
-                       2'b00: return (True);
-                       2'b10: return (True);
-                       default: return (False);
-                    endcase
-      AHBL_BITS32 : case (addr_lsbs)
-                       2'b00: return (True);
-                       default: return (False);
-                    endcase
-      default: return (False);
-   endcase
-endfunction
-
-function Bit #(32) fn_replace_bytes (  Bit #(2) addr_lsbs
-                                     , AHBL_Size  size
-                                     , Bit #(32)  old_word
-                                     , Bit #(32)  hwdata);
-
-   let new_word = old_word;
-   case (size)
-      AHBL_BITS8:  case (addr_lsbs)
-                      2'b00: new_word = { old_word [31:24], old_word [23:16], old_word [15:8], hwdata   [7:0] };
-                      2'b01: new_word = { old_word [31:24], old_word [23:16], hwdata   [15:8], old_word [7:0] };
-                      2'b10: new_word = { old_word [31:24], hwdata   [23:16], old_word [15:8], old_word [7:0] };
-                      2'b11: new_word = { hwdata   [31:24], old_word [23:16], old_word [15:8], old_word [7:0] };
-                   endcase
-      AHBL_BITS16: case (addr_lsbs)
-                      2'b00: new_word = { old_word [31:16], hwdata   [15:0] };
-                      2'b10: new_word = { hwdata   [31:16], old_word [15:0] };
-                   endcase
-      AHBL_BITS32: case (addr_lsbs)
-                      2'b00: new_word = hwdata;
-                   endcase
-   endcase
-   return new_word;
-endfunction
 
 // ================================================================
 
