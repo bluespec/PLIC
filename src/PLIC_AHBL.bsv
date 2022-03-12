@@ -76,12 +76,9 @@ endinterface
 interface PLIC_IFC #(numeric type  t_n_external_sources,
                      numeric type  t_n_targets,
                      numeric type  t_max_priority);
-   // Debugging
-   method Action set_verbosity (Bit #(4) verbosity);
-   method Action show_PLIC_state;
 
    // Main Fabric Reqs/Rsps
-   interface AHBL_Slave_IFC #(AHB_Wd_Data) target;
+   interface AHBL_Slave_IFC #(AHB_Wd_Data) fabric;
 
    // sources
    interface Vector #(t_n_external_sources, PLIC_Source_IFC)  v_sources;
@@ -107,7 +104,7 @@ module mkPLIC #(
    , Log #(TAdd #(t_max_priority, 1), t_wd_priority));
 
    // 0 = quiet; 1 = show PLIC transactions; 2 = also show AXI4 transactions
-   Reg #(Bit #(4)) cfg_verbosity <- mkConfigReg (0);
+   Bit #(2) verbosity = 0;
 
    // Source_Ids and Priorities are read and written over the memory interface
    // and should fit within the data bus width, currently 64 bits.
@@ -230,7 +227,7 @@ module mkPLIC #(
    // Reset
 
    rule rl_reset (rg_state == RST);
-      if (cfg_verbosity != 0)
+      if (verbosity != 0)
          $display ("%6d:[D]:%m.rl_reset", cur_cycle);
 
       for (Integer source_id = 0; source_id < n_sources; source_id = source_id + 1) begin
@@ -313,7 +310,7 @@ module mkPLIC #(
          else if (source_id <= fromInteger (n_sources - 1)) begin
             vrg_source_prio [source_id] <= changeWidth (w_hwdata);
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_wr_req: writing Source Priority: source %0d = 0x%0h",
                          cur_cycle, source_id, w_hwdata);
          end
@@ -326,7 +323,7 @@ module mkPLIC #(
          Bit #(T_wd_source_id)  source_id_base = truncate ({ addr_offset [11:0], 5'h0 });
 
          if (source_id_base <= fromInteger (n_sources - 1)) begin
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_wr_req: Ignoring write to Read-only Intr Pending 32 bits from source %0d",
                          cur_cycle, source_id_base);
          end
@@ -348,7 +345,7 @@ module mkPLIC #(
                   vvrg_ie [target_id][source_id] <= unpack (wdata32 [k]);
             end
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_wr_req: writing Intr Enable 32 bits for target %0d from source %0d = 0x%0h",
                          cur_cycle, target_id, source_id_base, wdata32);
          end
@@ -361,7 +358,7 @@ module mkPLIC #(
          if (target_id <= fromInteger (n_targets - 1)) begin
             vrg_target_threshold [target_id] <= changeWidth (wdata32);
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_wr_req: writing threshold for target %0d = 0x%0h",
                          cur_cycle, target_id, wdata32);
          end
@@ -378,7 +375,7 @@ module mkPLIC #(
             if (vrg_source_busy [source_id]) begin
                vrg_source_busy [source_id] <= False;
                vrg_servicing_source [target_id] <= 0;
-               if (cfg_verbosity > 0)
+               if (verbosity > 0)
                   $display ("%06d:[D]:%m.rl_wr_req: writing completion for target %0d for source 0x%0h",
                      cur_cycle, target_id, source_id);
             end
@@ -404,7 +401,7 @@ module mkPLIC #(
          rg_state  <= RDY;
       end
 
-      if (cfg_verbosity > 1) 
+      if (verbosity > 1) 
          $display ("%06d:[D]:%m.rl_wr_req", cur_cycle);
    endrule
 
@@ -422,7 +419,7 @@ module mkPLIC #(
          else if (source_id <= fromInteger (n_sources - 1)) begin
             rdata = changeWidth (vrg_source_prio [source_id]);
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_process_rd_req: reading Source Priority: source %0d = 0x%0h",
                          cur_cycle, source_id, rdata);
          end
@@ -446,7 +443,7 @@ module mkPLIC #(
             Bit #(32) v_ip = pack (genWith  (fn_ip_source_id));
             rdata = changeWidth (v_ip);
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_process_rd_req: reading Intr Pending 32 bits from source %0d = 0x%0h",
                          cur_cycle, source_id_base, rdata);
          end
@@ -472,7 +469,7 @@ module mkPLIC #(
             Bit #(32) v_ie = pack (genWith  (fn_ie_source_id));
             rdata = changeWidth (v_ie);
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_process_rd_req: reading Intr Enable 32 bits from source %0d = 0x%0h",
                          cur_cycle, source_id_base, rdata);
          end
@@ -485,7 +482,7 @@ module mkPLIC #(
          if (target_id <= fromInteger (n_targets - 1)) begin
             rdata = changeWidth (vrg_target_threshold [target_id]);
 
-            if (cfg_verbosity > 0)
+            if (verbosity > 0)
                $display ("%0d: PLIC.rl_process_rd_req: reading Threshold for target %0d = 0x%0h",
                          cur_cycle, target_id, rdata);
          end
@@ -513,7 +510,7 @@ module mkPLIC #(
                   vrg_servicing_source [target_id] <= truncate (max_id);
                   rdata = changeWidth (max_id);
 
-                  if (cfg_verbosity > 0)
+                  if (verbosity > 0)
                      $display ("%0d: PLIC.rl_process_rd_req: reading Claim for target %0d = 0x%0h",
                         cur_cycle, target_id, rdata);
                end
@@ -563,7 +560,7 @@ module mkPLIC #(
                 if (! vrg_source_busy [source_id + 1]) begin
                    vrg_source_ip [source_id + 1] <= set_not_clear;
 
-                   if ((cfg_verbosity > 0) && (vrg_source_ip [source_id + 1] != set_not_clear))
+                   if ((verbosity > 0) && (vrg_source_ip [source_id + 1] != set_not_clear))
                       $display ("%0d: %m.m_interrupt_req: changing vrg_source_ip [%0d] to %0d",
                                 cur_cycle, source_id + 1, pack (set_not_clear));
                 end
@@ -587,15 +584,6 @@ module mkPLIC #(
 
    // ================================================================
    // INTERFACE
-
-   // Debugging
-   method Action set_verbosity (Bit #(4) verbosity);
-      cfg_verbosity <= verbosity;
-   endmethod
-
-   method Action show_PLIC_state;
-      fa_show_PLIC_state;
-   endmethod
 
    // sources
    interface  v_sources    = genWith  (fn_mk_PLIC_Source_IFC);
