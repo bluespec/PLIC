@@ -121,27 +121,28 @@ module mkPLIC #(
    // AHB-Lite signals and registers
 
    // Inputs
-   Wire #(Bool)        w_hsel      <- mkBypassWire;
-   Wire #(AHB_Fabric_Addr)   w_haddr     <- mkBypassWire;
-   Wire #(AHBL_Burst)  w_hburst    <- mkBypassWire;
-   Wire #(Bool)        w_hmastlock <- mkBypassWire;
-   Wire #(AHBL_Prot)   w_hprot     <- mkBypassWire;
-   Wire #(AHBL_Size)   w_hsize     <- mkBypassWire;
-   Wire #(AHBL_Trans)  w_htrans    <- mkBypassWire;
-   Wire #(AHB_Fabric_Data)   w_hwdata    <- mkBypassWire;
-   Wire #(Bool)        w_hwrite    <- mkBypassWire;
+   Wire #(Bool)            w_hsel      <- mkBypassWire;
+   Wire #(Bool)            w_hready_in <- mkBypassWire;
+   Wire #(AHB_Fabric_Addr) w_haddr     <- mkBypassWire;
+   Wire #(AHBL_Burst)      w_hburst    <- mkBypassWire;
+   Wire #(Bool)            w_hmastlock <- mkBypassWire;
+   Wire #(AHBL_Prot)       w_hprot     <- mkBypassWire;
+   Wire #(AHBL_Size)       w_hsize     <- mkBypassWire;
+   Wire #(AHBL_Trans)      w_htrans    <- mkBypassWire;
+   Wire #(AHB_Fabric_Data) w_hwdata    <- mkBypassWire;
+   Wire #(Bool)            w_hwrite    <- mkBypassWire;
 
    // Outputs
-   Reg  #(Bool)       rg_hready    <- mkReg(True);
-   Reg  #(AHBL_Resp)  rg_hresp     <- mkReg(AHBL_OKAY);
-   Reg  #(AHB_Fabric_Data)  rg_hrdata    <- mkRegU;
+   Reg  #(Bool)            rg_hready    <- mkReg(True);
+   Reg  #(AHBL_Resp)       rg_hresp     <- mkReg(AHBL_OKAY);
+   Reg  #(AHB_Fabric_Data) rg_hrdata    <- mkRegU;
 
-   Reg #(AHB_Fabric_Addr)   rg_haddr     <- mkRegU;
-   Reg #(AHBL_Size)   rg_hsize     <- mkRegU;
-   Reg #(AHBL_Trans)  rg_htrans    <- mkRegU;
-   Reg #(Bool)        rg_hwrite    <- mkRegU;
+   Reg #(AHB_Fabric_Addr)  rg_haddr     <- mkRegU;
+   Reg #(AHBL_Size)        rg_hsize     <- mkRegU;
+   Reg #(AHBL_Trans)       rg_htrans    <- mkRegU;
+   Reg #(Bool)             rg_hwrite    <- mkRegU;
 
-   Reg #(AHBL_Tgt_State) rg_state  <- mkReg (RST);
+   Reg #(AHBL_Tgt_State)   rg_state  <- mkReg (RST);
 
    // ----------------
    // Per-interrupt source state
@@ -169,7 +170,7 @@ module mkPLIC #(
             Vector #(t_n_sources, Reg #(Bool)))  vvrg_ie <- replicateM (replicateM (mkReg (False)));
 
    // Memory map
-   SoC_Map soc_map <- mkSoC_Map;
+   SoC_Map_IFC soc_map <- mkSoC_Map;
 
    // ================================================================
    // Compute outputs for each target (combinational)
@@ -210,11 +211,11 @@ module mkPLIC #(
    // ----------------
    // Address Checks
    function Bool fn_addr_is_in_range (Fabric_Addr addr);
-      return ((soc_map.m_pic_addr_base <= addr) && (addr < soc_map.m_pic_addr_lim));
+      return ((soc_map.m_plic_addr_base <= addr) && (addr < soc_map.m_plic_addr_lim));
    endfunction
 
    function Bool fn_addr_is_ok (Fabric_Addr addr, AHBL_Size size);
-      return (   fn_is_aligned (addr[1:0], size)
+      return (   fn_ahbl_is_aligned (addr[1:0], size)
               && fn_addr_is_in_range (addr)
              );
    endfunction
@@ -267,7 +268,7 @@ module mkPLIC #(
 
    (* fire_when_enabled, no_implicit_conditions *)
    rule rl_new_req (   (rg_state == RDY)
-                    && (w_hsel && (w_htrans == AHBL_NONSEQ)));
+                    && (w_hsel && w_hready_in && (w_htrans == AHBL_NONSEQ)));
 
       // Register fresh address-and-control inputs
       rg_haddr     <= w_haddr;
@@ -342,12 +343,12 @@ module mkPLIC #(
             for (Bit #(T_wd_source_id)  k = 0; k < 32; k = k + 1) begin
                Bit #(T_wd_source_id)  source_id = source_id_base + k;
                if (source_id <= fromInteger (n_sources - 1))
-                  vvrg_ie [target_id][source_id] <= unpack (wdata32 [k]);
+                  vvrg_ie [target_id][source_id] <= unpack (w_hwdata [k]);
             end
 
             if (verbosity > 0)
                $display ("%0d: PLIC.rl_wr_req: writing Intr Enable 32 bits for target %0d from source %0d = 0x%0h",
-                         cur_cycle, target_id, source_id_base, wdata32);
+                         cur_cycle, target_id, source_id_base, w_hwdata);
          end
          else  werr = True;
       end
@@ -356,11 +357,11 @@ module mkPLIC #(
       else if ((addr_offset [31:0] & 32'hFFFF_0FFF) == 32'h0020_0000) begin
          Bit #(T_wd_target_id)  target_id = truncate (addr_offset [20:12]);
          if (target_id <= fromInteger (n_targets - 1)) begin
-            vrg_target_threshold [target_id] <= changeWidth (wdata32);
+            vrg_target_threshold [target_id] <= changeWidth (w_hwdata);
 
             if (verbosity > 0)
                $display ("%0d: PLIC.rl_wr_req: writing threshold for target %0d = 0x%0h",
-                         cur_cycle, target_id, wdata32);
+                         cur_cycle, target_id, w_hwdata);
          end
          else  werr = True;
       end
@@ -501,7 +502,7 @@ module mkPLIC #(
                $display ("    Still servicing interrupt from source %0d", vrg_servicing_source [target_id]);
                $display ("    Trying to claim service   for  source %0d", max_id);
                $display ("    Ignoring.");
-               rresp = axi4_resp_slverr;
+               rerr = True;
             end
             else begin
                if (max_id != 0) begin
@@ -592,12 +593,16 @@ module mkPLIC #(
    interface  v_targets    = genWith  (fn_mk_PLIC_Target_IFC);
 
    // Memory-mapped access: fabric interface
-   interface AHBL_Slave_IFC target;
+   interface AHBL_Slave_IFC fabric;
       // ----------------
       // Inputs
 
       method Action hsel (Bool sel);
          w_hsel <= sel;
+      endmethod
+
+      method Action hready (Bool hready_in);
+         w_hready_in <= hready_in;
       endmethod
 
       method Action haddr (AHB_Fabric_Addr addr);
