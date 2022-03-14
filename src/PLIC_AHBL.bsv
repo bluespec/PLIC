@@ -292,7 +292,7 @@ module mkPLIC #(
       end
 
       if (verbosity != 0)
-         $display ("%06d:[D]:%m.rl_new_req: haddr 0x%08h",
+         $display ("%06d:[D]:%m.rl_new_req: haddr 0x%08h", cur_cycle,
             w_haddr, fshow (w_hsize), " hwrite %0d htrans ", w_hwrite, fshow (w_htrans));
    endrule
 

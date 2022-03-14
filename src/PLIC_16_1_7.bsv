@@ -18,22 +18,21 @@ package PLIC_16_1_7;
 // ================================================================
 // Project imports
 
-//import SoC_Map :: *;    // For N_External_Interrupt_Sources
-import PLIC    :: *;    // For PLIC_IFC, mkPLIC
-import Vector  :: *;
+import PLIC_AHBL  :: *;    // For PLIC_IFC, mkPLIC
+import Vector     :: *;
 
 // ================================================================
 // PLIC for this core
 
-typedef 16  N_External_Interrupt_Sources;
+typedef 16  N_EXT_INTR;
 typedef  1  PLIC_N_Targets;
 typedef  7  PLIC_Max_Priority;
 
-typedef TAdd #(N_External_Interrupt_Sources, 1) T_n_sources;
+typedef TAdd #(N_EXT_INTR, 1) T_n_sources;
 typedef TLog #(TAdd #(PLIC_Max_Priority, 1))    T_wd_priority;
 
 
-typedef  PLIC_IFC #(N_External_Interrupt_Sources,
+typedef  PLIC_IFC #(N_EXT_INTR,
 		    PLIC_N_Targets,
 		    PLIC_Max_Priority)             PLIC_IFC_16_1_7;
 
