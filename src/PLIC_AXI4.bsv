@@ -1,6 +1,6 @@
 // Copyright (c) 2019-2020 Bluespec, Inc.  All Rights Reserved
 
-package PLIC;
+package PLIC_AXI4;
 
 // ================================================================
 // This package implements a PLIC (Platform-Level Interrupt Controller)
@@ -22,16 +22,17 @@ import  Assert       :: *;
 // ----------------
 // BSV additional libs
 
-import  Cur_Cycle  :: *;
-import  GetPut_Aux :: *;
-import  Semi_FIFOF :: *;
+import  Cur_Cycle    :: *;
+import  GetPut_Aux   :: *;
+import  Semi_FIFOF   :: *;
 
 // ================================================================
 // Project imports
 
-import AXI4_Types   :: *;
-import AXI4_Fabric  :: *;
-import Fabric_Defs  :: *;    // for Wd_Id, Wd_Addr, Wd_Data, Wd_User
+import SoC_Map       :: *;
+import AXI4_Types    :: *;
+import AXI4_Fabric   :: *;
+import Fabric_Defs   :: *;    // for Wd_Id, Wd_Addr, Wd_Data, Wd_User
 
 // ================================================================
 // Change bitwidth without requiring < or > constraints.
@@ -47,6 +48,10 @@ endfunction
 
 typedef  10  T_wd_source_id;    // Max 1024 sources (source 0 is reserved for 'no interrupt')
 typedef   5  T_wd_target_id;    // Max 32 targets
+
+// Module state
+typedef enum {MODULE_START, MODULE_READY } Module_State
+deriving (Bits, Eq, FShow);
 
 // ================================================================
 // Interfaces
@@ -73,18 +78,9 @@ endinterface
 interface PLIC_IFC #(numeric type  t_n_external_sources,
 		     numeric type  t_n_targets,
 		     numeric type  t_max_priority);
-   // Debugging
-   method Action set_verbosity (Bit #(4) verbosity);
-   method Action show_PLIC_state;
-
-   // Reset
-   interface Server #(Bit #(0), Bit #(0))  server_reset;
-
-   // set_addr_map should be called after this module's reset
-   method Action set_addr_map (Fabric_Addr  addr_base, Fabric_Addr  addr_lim);
 
    // Memory-mapped access
-   interface AXI4_Slave_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) axi4_slave;
+   interface AXI4_Slave_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) axi4;
 
    // sources
    interface Vector #(t_n_external_sources, PLIC_Source_IFC)  v_sources;
@@ -108,7 +104,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	     Log #(TAdd #(t_max_priority, 1), t_wd_priority));
 
    // 0 = quiet; 1 = show PLIC transactions; 2 = also show AXI4 transactions
-   Reg #(Bit #(4)) cfg_verbosity <- mkConfigReg (0);
+   Bit #(2) verbosity = 0;
 
    // Source_Ids and Priorities are read and written over the memory interface
    // and should fit within the data bus width, currently 64 bits.
@@ -123,12 +119,13 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    FIFOF #(Bit #(0))  f_reset_reqs <- mkFIFOF;
    FIFOF #(Bit #(0))  f_reset_rsps <- mkFIFOF;
 
+   Reg #(Module_State) rg_state     <- mkReg (MODULE_START);
+
    // ----------------
    // Memory-mapped access
 
    // Base and limit addrs for this memory-mapped block.
-   Reg #(Fabric_Addr)  rg_addr_base <- mkRegU;
-   Reg #(Fabric_Addr)  rg_addr_lim  <- mkRegU;
+   SoC_Map_IFC soc_map <- mkSoC_Map;
 
    // Connector to AXI4 fabric
    AXI4_Slave_Xactor_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) slave_xactor <- mkAXI4_Slave_Xactor;
@@ -197,11 +194,9 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // ================================================================
    // Soft reset
 
-   rule rl_reset;
-      if (cfg_verbosity > 0)
-	 $display ("%0d: PLIC.rl_reset", cur_cycle);
-
-      let x <- pop (f_reset_reqs);
+   rule rl_reset (rg_state == MODULE_START);
+      if (verbosity > 0)
+	 $display ("%06d:[D]:%m.rl_reset", cur_cycle);
 
       for (Integer source_id = 0; source_id < n_sources; source_id = source_id + 1) begin
 	 vrg_source_ip   [source_id] <= False;
@@ -221,7 +216,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 
       slave_xactor.reset;
 
-      f_reset_rsps.enq (?);
+      rg_state <= MODULE_READY;
    endrule
 
    // ================================================================
@@ -232,34 +227,27 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // ----------------------------------------------------------------
    // Handle memory-mapped read requests
 
-   rule rl_process_rd_req (! f_reset_reqs.notEmpty);
+   rule rl_process_rd_req (   (rg_state == MODULE_READY)
+                           && (! f_reset_reqs.notEmpty));
 
       let rda <- pop_o (slave_xactor.o_rd_addr);
-      if (cfg_verbosity > 1) begin
-	 $display ("%0d: PLIC.rl_process_rd_req:", cur_cycle);
+      if (verbosity > 1) begin
+	 $display ("%06d:[D]:%m.rl_process_rd_req:", cur_cycle);
 	 $display ("    ", fshow (rda));
       end
 
-      let          addr_offset = rda.araddr - rg_addr_base;
+      let          addr_offset = rda.araddr - soc_map.m_plic_addr_base;
       Fabric_Data  rdata       = 0;
       AXI4_Resp    rresp       = axi4_resp_okay;
 
-      if (rda.araddr < rg_addr_base) begin
-	 // Technically this should not happen: the fabric should
-	 // never have delivered such an addr to this IP.
-	 $display ("%0d: ERROR: PLIC.rl_process_rd_req: unrecognized addr", cur_cycle);
-	 $display ("            ", fshow (rda));
-	 rresp = axi4_resp_decerr;
-      end
-
       // Source Priority
-      else if (addr_offset < 'h1000) begin
+      if (addr_offset < 'h1000) begin
 	 Bit #(T_wd_source_id)  source_id = truncate (addr_offset [11:2]);
 	 if ((0 < source_id) && (source_id <= fromInteger (n_sources - 1))) begin
 	    rdata = changeWidth (vrg_source_prio [source_id]);
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_rd_req: reading Source Priority: source %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_rd_req: reading Source Priority: source %0d = 0x%0h",
 			 cur_cycle, source_id, rdata);
 	 end
 	 else
@@ -283,8 +271,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	    Bit #(32) v_ip = pack (genWith  (fn_ip_source_id));
 	    rdata = changeWidth (v_ip);
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_rd_req: reading Intr Pending 32 bits from source %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_rd_req: reading Intr Pending 32 bits from source %0d = 0x%0h",
 			 cur_cycle, source_id_base, rdata);
 	 end
 	 else
@@ -310,8 +298,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	    Bit #(32) v_ie = pack (genWith  (fn_ie_source_id));
 	    rdata = changeWidth (v_ie);
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_rd_req: reading Intr Enable 32 bits from source %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_rd_req: reading Intr Enable 32 bits from source %0d = 0x%0h",
 			 cur_cycle, source_id_base, rdata);
 	 end
 	 else
@@ -324,8 +312,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	 if (target_id <= fromInteger (n_targets - 1)) begin
 	    rdata = changeWidth (vrg_target_threshold [target_id]);
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_rd_req: reading Threshold for target %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_rd_req: reading Threshold for target %0d = 0x%0h",
 			 cur_cycle, target_id, rdata);
 	 end
 	 else
@@ -353,8 +341,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 		  vrg_servicing_source [target_id] <= truncate (max_id);
 		  rdata = changeWidth (max_id);
 
-		  if (cfg_verbosity > 0)
-		     $display ("%0d: PLIC.rl_process_rd_req: reading Claim for target %0d = 0x%0h",
+		  if (verbosity > 0)
+		     $display ("%06d:[D]:%m.rl_process_rd_req: reading Claim for target %0d = 0x%0h",
 			cur_cycle, target_id, rdata);
 	       end
 	    end
@@ -383,8 +371,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 			      ruser: rda.aruser};
       slave_xactor.i_rd_data.enq (rdr);
 
-      if (cfg_verbosity > 1) begin
-	 $display ("%0d: PLIC.rl_process_rd_req", cur_cycle);
+      if (verbosity > 1) begin
+	 $display ("%06d:[D]:%m.rl_process_rd_req", cur_cycle);
 	 $display ("            ", fshow (rda));
 	 $display ("            ", fshow (rdr));
       end
@@ -395,39 +383,30 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 
    (* descending_urgency = "rl_process_rd_req, rl_process_wr_req" *)    // Ad hoc order
 
-   rule rl_process_wr_req (! f_reset_reqs.notEmpty);
+   rule rl_process_wr_req ((rg_state == MODULE_READY) && (! f_reset_reqs.notEmpty));
 
       let wra <- pop_o (slave_xactor.o_wr_addr);
       let wrd <- pop_o (slave_xactor.o_wr_data);
-      if (cfg_verbosity > 1) begin
-	 $display ("%0d: PLIC.rl_process_wr_req", cur_cycle);
+      if (verbosity > 1) begin
+	 $display ("%06d:[D]:%m.rl_process_wr_req", cur_cycle);
 	 $display ("    ", fshow (wra));
 	 $display ("    ", fshow (wrd));
       end
 
-      let addr_offset  = wra.awaddr - rg_addr_base;
+      let addr_offset  = wra.awaddr - soc_map.m_plic_addr_base;
       let wdata32      = (((valueOf (Wd_Data) == 64) && ((addr_offset & 'h7) == 'h4))
 			  ? wrd.wdata [63:32]
 			  : wrd.wdata [31:0]);
       let bresp = axi4_resp_okay;
 
-      if (wra.awaddr < rg_addr_base) begin
-	 // Technically this should not happen: the fabric should
-	 // never have delivered such an addr to this IP.
-	 $display ("%0d: ERROR: PLIC.rl_process_wr_req: unrecognized addr", cur_cycle);
-	 $display ("            ", fshow (wra));
-	 $display ("            ", fshow (wrd));
-	 bresp = axi4_resp_decerr;
-      end
-
       // Source priority
-      else if (addr_offset < 'h1000) begin
+      if (addr_offset < 'h1000) begin
 	 Bit #(T_wd_source_id)  source_id = truncate (addr_offset [11:2]);
 	 if ((0 < source_id) && (source_id <= fromInteger (n_sources - 1))) begin
 	    vrg_source_prio [source_id] <= changeWidth (wdata32);
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_wr_req: writing Source Priority: source %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_wr_req: writing Source Priority: source %0d = 0x%0h",
 			 cur_cycle, source_id, wdata32);
 	 end
 	 else begin
@@ -442,8 +421,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	 Bit #(T_wd_source_id)  source_id_base = truncate ({ addr_offset [11:0], 5'h0 });
 
 	 if (source_id_base <= fromInteger (n_sources - 1)) begin
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_wr_req: Ignoring write to Read-only Intr Pending 32 bits from source %0d",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_wr_req: Ignoring write to Read-only Intr Pending 32 bits from source %0d",
 			 cur_cycle, source_id_base);
 	 end
 	 else
@@ -465,8 +444,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 		  vvrg_ie [target_id][source_id] <= unpack (wdata32 [k]);
 	    end
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_wr_req: writing Intr Enable 32 bits for target %0d from source %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_wr_req: writing Intr Enable 32 bits for target %0d from source %0d = 0x%0h",
 			 cur_cycle, target_id, source_id_base, wdata32);
 	 end
 	 else
@@ -479,8 +458,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	 if (target_id <= fromInteger (n_targets - 1)) begin
 	    vrg_target_threshold [target_id] <= changeWidth (wdata32);
 
-	    if (cfg_verbosity > 0)
-	       $display ("%0d: PLIC.rl_process_wr_req: writing threshold for target %0d = 0x%0h",
+	    if (verbosity > 0)
+	       $display ("%06d:[D]:%m.rl_process_wr_req: writing threshold for target %0d = 0x%0h",
 			 cur_cycle, target_id, wdata32);
 	 end
 	 else
@@ -497,8 +476,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	    if (vrg_source_busy [source_id]) begin
 	       vrg_source_busy [source_id] <= False;
 	       vrg_servicing_source [target_id] <= 0;
-	       if (cfg_verbosity > 0)
-		  $display ("%0d: PLIC.rl_process_wr_req: writing completion for target %0d for source 0x%0h",
+	       if (verbosity > 0)
+		  $display ("%06d:[D]:%m.rl_process_wr_req: writing completion for target %0d for source 0x%0h",
 		     cur_cycle, target_id, source_id);
 	    end
 	    else begin
@@ -517,7 +496,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	 bresp = axi4_resp_slverr;
 
       if (bresp != axi4_resp_okay) begin
-	 $display ("%0d: ERROR: PLIC.rl_process_wr_req: unrecognized addr", cur_cycle);
+	 $display ("%06d:[E]:%m.rl_process_wr_req: unrecognized addr", cur_cycle);
 	 $display ("            ", fshow (wra));
 	 $display ("            ", fshow (wrd));
       end
@@ -528,8 +507,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 			      buser: wra.awuser};
       slave_xactor.i_wr_resp.enq (wrr);
 
-      if (cfg_verbosity > 1) begin
-	 $display ("%0d: PLIC.AXI4.rl_process_wr_req", cur_cycle);
+      if (verbosity > 1) begin
+	 $display ("%06d:[D]:%m.AXI4.rl_process_wr_req", cur_cycle);
 	 $display ("            ", fshow (wra));
 	 $display ("            ", fshow (wrd));
 	 $display ("            ", fshow (wrr));
@@ -546,7 +525,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 		      if (! vrg_source_busy [source_id + 1]) begin
 			 vrg_source_ip [source_id + 1] <= set_not_clear;
 
-			 if ((cfg_verbosity > 0) && (vrg_source_ip [source_id + 1] != set_not_clear))
+			 if ((verbosity > 0) && (vrg_source_ip [source_id + 1] != set_not_clear))
 			    $display ("%0d: %m.m_interrupt_req: changing vrg_source_ip [%0d] to %0d",
 				      cur_cycle, source_id + 1, pack (set_not_clear));
 		      end
@@ -571,37 +550,8 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // ================================================================
    // INTERFACE
 
-   // Debugging
-   method Action set_verbosity (Bit #(4) verbosity);
-      cfg_verbosity <= verbosity;
-   endmethod
-
-   method Action show_PLIC_state;
-      fa_show_PLIC_state;
-   endmethod
-
-   // Reset
-   interface server_reset   = toGPServer (f_reset_reqs, f_reset_rsps);
-
-   // set_addr_map should be called after this module's reset
-   method Action set_addr_map (Fabric_Addr  addr_base, Fabric_Addr  addr_lim);
-      if (addr_base [1:0] != 0)
-	 $display ("%0d: WARNING: PLIC.set_addr_map: addr_base 0x%0h is not 4-Byte-aligned",
-		   cur_cycle, addr_base);
-
-      if (addr_lim [1:0] != 0)
-	 $display ("%0d: WARNING: PLIC.set_addr_map: addr_lim 0x%0h is not 4-Byte-aligned",
-		   cur_cycle, addr_lim);
-
-      rg_addr_base <= addr_base;
-      rg_addr_lim  <= addr_lim;
-
-      if (cfg_verbosity > 0)
-	 $display ("%0d: PLIC.set_addr_map: base 0x%0h limit 0x%0h", cur_cycle, addr_base, addr_lim);
-   endmethod
-
    // Memory-mapped access
-   interface  axi4_slave = slave_xactor.axi_side;
+   interface  axi4 = slave_xactor.axi_side;
 
    // sources
    interface  v_sources = genWith  (fn_mk_PLIC_Source_IFC);
