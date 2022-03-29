@@ -29,7 +29,6 @@ import  Semi_FIFOF   :: *;
 // ================================================================
 // Project imports
 
-import SoC_Map       :: *;
 import AXI4_Types    :: *;
 import AXI4_Fabric   :: *;
 import Fabric_Defs   :: *;    // for Wd_Id, Wd_Addr, Wd_Data, Wd_User
@@ -115,17 +114,13 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    Integer  n_targets = valueOf (t_n_targets);
 
    // ----------------
-   // Soft reset requests and responses
-   FIFOF #(Bit #(0))  f_reset_reqs <- mkFIFOF;
-   FIFOF #(Bit #(0))  f_reset_rsps <- mkFIFOF;
-
    Reg #(Module_State) rg_state     <- mkReg (MODULE_START);
 
    // ----------------
    // Memory-mapped access
 
-   // Base and limit addrs for this memory-mapped block.
-   SoC_Map_IFC soc_map <- mkSoC_Map;
+   // Address mask for PLIC addresses (from SoC Map limit)
+   Fabric_Addr addr_mask = 'h3f_ffff;
 
    // Connector to AXI4 fabric
    AXI4_Slave_Xactor_IFC #(Wd_Id, Wd_Addr, Wd_Data, Wd_User) slave_xactor <- mkAXI4_Slave_Xactor;
@@ -227,8 +222,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
    // ----------------------------------------------------------------
    // Handle memory-mapped read requests
 
-   rule rl_process_rd_req (   (rg_state == MODULE_READY)
-                           && (! f_reset_reqs.notEmpty));
+   rule rl_process_rd_req (rg_state == MODULE_READY);
 
       let rda <- pop_o (slave_xactor.o_rd_addr);
       if (verbosity > 1) begin
@@ -236,7 +230,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	 $display ("    ", fshow (rda));
       end
 
-      let          addr_offset = rda.araddr - soc_map.m_plic_addr_base;
+      let          addr_offset = rda.araddr & addr_mask;
       Fabric_Data  rdata       = 0;
       AXI4_Resp    rresp       = axi4_resp_okay;
 
@@ -383,7 +377,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 
    (* descending_urgency = "rl_process_rd_req, rl_process_wr_req" *)    // Ad hoc order
 
-   rule rl_process_wr_req ((rg_state == MODULE_READY) && (! f_reset_reqs.notEmpty));
+   rule rl_process_wr_req (rg_state == MODULE_READY);
 
       let wra <- pop_o (slave_xactor.o_wr_addr);
       let wrd <- pop_o (slave_xactor.o_wr_data);
@@ -393,7 +387,7 @@ module mkPLIC #(function Tuple2 #(Bit #(t_wd_priority), Bit #(TLog #(t_n_sources
 	 $display ("    ", fshow (wrd));
       end
 
-      let addr_offset  = wra.awaddr - soc_map.m_plic_addr_base;
+      let addr_offset  = wra.awaddr & addr_mask;
       let wdata32      = (((valueOf (Wd_Data) == 64) && ((addr_offset & 'h7) == 'h4))
 			  ? wrd.wdata [63:32]
 			  : wrd.wdata [31:0]);
