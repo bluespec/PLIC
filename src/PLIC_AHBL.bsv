@@ -16,7 +16,6 @@ package PLIC_AHBL;
 
 import  ConfigReg    :: *;
 import  Vector       :: *;
-import  FIFOF        :: *;
 import  ClientServer :: *;
 import  Assert       :: *;
 
@@ -25,7 +24,6 @@ import  Assert       :: *;
 
 import  Cur_Cycle    :: *;
 import  GetPut_Aux   :: *;
-import  Semi_FIFOF   :: *;
 
 // ================================================================
 // Project imports
@@ -33,7 +31,6 @@ import  Semi_FIFOF   :: *;
 import AHBL_Types    :: *;
 import AHBL_Defs     :: *;
 import Fabric_Defs   :: *;    // for Wd_Id, Wd_Addr, Wd_Data, Wd_User
-import SoC_Map       :: *;
 
 // ================================================================
 // Change bitwidth without requiring < or > constraints.
@@ -170,7 +167,8 @@ module mkPLIC #(
             Vector #(t_n_sources, Reg #(Bool)))  vvrg_ie <- replicateM (replicateM (mkReg (False)));
 
    // Memory map
-   SoC_Map_IFC soc_map <- mkSoC_Map;
+   // Address mask for PLIC addresses (from SoC Map limit)
+   Fabric_Addr addr_mask = 'h3f_ffff;
 
    // ================================================================
    // Compute outputs for each target (combinational)
@@ -210,19 +208,9 @@ module mkPLIC #(
 
    // ----------------
    // Address Checks
-   function Bool fn_addr_is_in_range (Fabric_Addr addr);
-      return ((soc_map.m_plic_addr_base <= addr) && (addr < soc_map.m_plic_addr_lim));
-   endfunction
-
-   function Bool fn_addr_is_ok (Fabric_Addr addr, AHBL_Size size);
-      return (   fn_ahbl_is_aligned (addr[1:0], size)
-              && fn_addr_is_in_range (addr)
-             );
-   endfunction
-
    // Is the address okay? Use the raw address from the bus as this check is done
    // in the first phase.
-   let addr_is_ok = fn_addr_is_ok (w_haddr, w_hsize);
+   let addr_is_ok = fn_ahbl_is_aligned (w_haddr[1:0], w_hsize);
    
    // ================================================================
    // Reset
@@ -271,10 +259,10 @@ module mkPLIC #(
                     && (w_hsel && w_hready_in && (w_htrans == AHBL_NONSEQ)));
 
       // Register fresh address-and-control inputs
-      rg_haddr     <= w_haddr;
-      rg_hsize     <= w_hsize;
-      rg_htrans    <= w_htrans;
-      rg_hwrite    <= w_hwrite;
+      rg_haddr    <= w_haddr;
+      rg_hsize    <= w_hsize;
+      rg_htrans   <= w_htrans;
+      rg_hwrite   <= w_hwrite;
 
 
       if (addr_is_ok) begin
@@ -299,7 +287,7 @@ module mkPLIC #(
    // ----------------------------------------------------------------
    // Handle memory-mapped write requests
 
-   let addr_offset = rg_haddr - soc_map.m_plic_addr_base;
+   let addr_offset = rg_haddr & addr_mask;
    rule rl_wr_req ((rg_state == RSP) && (rg_hwrite));
       // Writes
       Bool werr = False; 
